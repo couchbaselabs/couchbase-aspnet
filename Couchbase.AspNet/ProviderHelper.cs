@@ -1,58 +1,55 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
 using System.Collections.Specialized;
 using Enyim.Reflection;
 using Enyim.Caching;
 
 namespace Couchbase.AspNet
 {
-	internal static class ProviderHelper
-	{
-		public static string GetAndRemove(NameValueCollection nvc, string name, bool required)
-		{
-			var tmp = nvc[name];
-			if (tmp == null)
-			{
-				if (required) throw new System.Configuration.ConfigurationErrorsException("Missing parameter: " + name);
-			}
-			else
-				nvc.Remove(name);
+    internal static class ProviderHelper
+    {
+        public static string GetAndRemove(NameValueCollection nvc, string name, bool required)
+        {
+            var tmp = nvc[name];
+            if (tmp == null) {
+                if (required)
+                    throw new System.Configuration.ConfigurationErrorsException("Missing parameter: " + name);
+            } else {
+                nvc.Remove(name);
+            }
 
-			return tmp;
-		}
+            return tmp;
+        }
 
-		public static void CheckForUnknownAttributes(NameValueCollection nvc)
-		{
-			if (nvc.Count > 0)
-				throw new System.Configuration.ConfigurationErrorsException("Unknown parameter: " + nvc.Keys[0]);
-		}
+        public static void CheckForUnknownAttributes(NameValueCollection nvc)
+        {
+            if (nvc.Count > 0)
+                throw new System.Configuration.ConfigurationErrorsException("Unknown parameter: " + nvc.Keys[0]);
+        }
 
-		public static IMemcachedClient GetClient(string name, NameValueCollection config, Func<ICouchbaseClientFactory> createDefault)
-		{
-			var factory = GetFactoryInstance(ProviderHelper.GetAndRemove(config, "factory", false), createDefault);
-			System.Diagnostics.Debug.Assert(factory != null, "factory == null");
+        public static IMemcachedClient GetClient(string name, NameValueCollection config, Func<ICouchbaseClientFactory> createDefault, out bool disposeClient)
+        {
+            var factory = GetFactoryInstance(ProviderHelper.GetAndRemove(config, "factory", false), createDefault);
+            System.Diagnostics.Debug.Assert(factory != null, "factory == null");
 
-			return factory.Create(name, config);
-		}
+            return factory.Create(name, config, out disposeClient);
+        }
 
-		private static ICouchbaseClientFactory GetFactoryInstance(string typeName, Func<ICouchbaseClientFactory> createDefault)
-		{
-			if (String.IsNullOrEmpty(typeName))
-				return createDefault();
+        private static ICouchbaseClientFactory GetFactoryInstance(string typeName, Func<ICouchbaseClientFactory> createDefault)
+        {
+            if (String.IsNullOrEmpty(typeName))
+                return createDefault();
 
-			var type = Type.GetType(typeName, false);
-			if (type == null)
-				throw new System.Configuration.ConfigurationErrorsException("Could not load type: " + typeName);
+            var type = Type.GetType(typeName, false);
+            if (type == null)
+                throw new System.Configuration.ConfigurationErrorsException("Could not load type: " + typeName);
 
-			if (!typeof(ICouchbaseClientFactory).IsAssignableFrom(type))
-				throw new System.Configuration.ConfigurationErrorsException("Type '" + typeName + "' must implement IMemcachedClientFactory");
+            if (!typeof(ICouchbaseClientFactory).IsAssignableFrom(type))
+                throw new System.Configuration.ConfigurationErrorsException("Type '" + typeName + "' must implement IMemcachedClientFactory");
 
-			return FastActivator.Create(type) as ICouchbaseClientFactory;
-		}
+            return FastActivator.Create(type) as ICouchbaseClientFactory;
+        }
 
-	}
+    }
 }
 
 #region [ License information          ]

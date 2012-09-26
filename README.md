@@ -13,7 +13,7 @@ ASP.NET SessionState Provider
 
 * You'll need .NET Framework 3.5 or later to use the precompiled binaries. 
 * To build the client, you'll need Visual Studio 2010 with MVC 3 installed.
-* The Nuget package for [CouchbaseNetClient 1.0.6](http://nuget.org/packages/CouchbaseNetClient) is referenced by Couchbase.AspNet
+* The Nuget package for [CouchbaseNetClient 1.1.6](http://nuget.org/packages/CouchbaseNetClient) is referenced by Couchbase.AspNet
 * Couchbase Server 1.8
 
 ## Configuring the SessionState provider
@@ -52,6 +52,22 @@ If you would like to use a custom configuration section, you may do so by specif
       </providers>
     </sessionState>
 
+If you would like to use a custom client factory, you may do so by specifying a value in the "factory" attribute of the provider entry. The example below sets it to the default factory, but you can replace this with your own factory class to have full control over the creation and lifecycle of the Couchbase client.
+
+    <sessionState customProvider="Couchbase" mode="Custom">
+      <providers>
+        <add name="Couchbase" type="Couchbase.AspNet.SessionState.CouchbaseSessionStateProvider, Couchbase.AspNet" factory="Couchbase.AspNet.SessionState.CouchbaseClientFactory" />
+      </providers>
+    </sessionState>
+
+This session handler also supports the ability to disable exclusive session access for ASP.NET sessions if desired. You can set the value using the "exclusiveAccess" attribute of the provider entry.
+
+    <sessionState customProvider="Couchbase" mode="Custom">
+      <providers>
+        <add name="Couchbase" type="Couchbase.AspNet.SessionState.CouchbaseSessionStateProvider, Couchbase.AspNet" exclusiveAccess="false" />
+      </providers>
+    </sessionState>
+	
 Note that currently, code-based configuration of the CouchbaseClient is not supported.
 
 In code, simply use the Session object as you normally would.

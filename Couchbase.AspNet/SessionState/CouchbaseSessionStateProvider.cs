@@ -1,14 +1,8 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
 using System.Web.SessionState;
 using System.Web;
 using System.IO;
 using System.Web.UI;
-using Couchbase.Configuration;
-using System.Net;
-using Couchbase;
 using Enyim.Caching;
 using Enyim.Caching.Memcached;
 
@@ -17,12 +11,22 @@ namespace Couchbase.AspNet.SessionState
 	public class CouchbaseSessionStateProvider : SessionStateStoreProviderBase
 	{
 		private IMemcachedClient client;
-
+        private bool disposeClient;
+        private static bool exclusiveAccess;
+        
 		public override void Initialize(string name, System.Collections.Specialized.NameValueCollection config)
 		{
+            // Initialize the base class
 			base.Initialize(name, config);
-			this.client = ProviderHelper.GetClient(name, config, () => (ICouchbaseClientFactory)new CouchbaseClientFactory());
 
+            // Create our Couchbase client instance
+            client = ProviderHelper.GetClient(name, config, () => (ICouchbaseClientFactory)new CouchbaseClientFactory(), out disposeClient);
+
+            // By default use exclusive session access. But allow it to be overridden in the config file
+            var exclusive = ProviderHelper.GetAndRemove(config, "exclusiveAccess", false) ?? "true";
+            exclusiveAccess = (String.Compare(exclusive, "true", true) == 0);
+
+            // Make sure no extra attributes are included
 			ProviderHelper.CheckForUnknownAttributes(config);
 		}
 
@@ -31,297 +35,325 @@ namespace Couchbase.AspNet.SessionState
 			return new SessionStateStoreData(new SessionStateItemCollection(), SessionStateUtility.GetSessionStaticObjects(context), timeout);
 		}
 
-		public override void CreateUninitializedItem(HttpContext context, string id, int timeout)
-		{
-			var e = new SessionStateItem
-			{
-				Data = new SessionStateItemCollection(),
-				Flag = SessionStateActions.InitializeItem,
-				LockId = 0,
-				Timeout = timeout
-			};
+        public override void CreateUninitializedItem(HttpContext context, string id, int timeout)
+        {
+            var e = new SessionStateItem {
+                Data = new SessionStateItemCollection(),
+                Flag = SessionStateActions.InitializeItem,
+                LockId = 0,
+                Timeout = timeout
+            };
 
-			e.Save(this.client, id, false, false);
-		}
+            e.Save(client, id, false, false);
+        }
 
 		public override void Dispose()
 		{
-			client.Dispose();
+            if (disposeClient) {
+                client.Dispose();
+            }
 		}
 
-		public override void EndRequest(HttpContext context) { }
+        public override void EndRequest(HttpContext context) { }
 
-		public override SessionStateStoreData GetItem(HttpContext context, string id, out bool locked, out TimeSpan lockAge, out object lockId, out SessionStateActions actions)
-		{
-			var e = Get(context, false, id, out locked, out lockAge, out lockId, out actions);
+        public override SessionStateStoreData GetItem(HttpContext context, string id, out bool locked, out TimeSpan lockAge, out object lockId, out SessionStateActions actions)
+        {
+            var e = Get(client, context, false, id, out locked, out lockAge, out lockId, out actions);
 
-			return (e == null)
-					? null
-					: e.ToStoreData(context);
-		}
+            return (e == null)
+                    ? null
+                    : e.ToStoreData(context);
+        }
 
-		public override SessionStateStoreData GetItemExclusive(HttpContext context, string id, out bool locked, out TimeSpan lockAge, out object lockId, out SessionStateActions actions)
-		{
-			var e = Get(context, true, id, out locked, out lockAge, out lockId, out actions);
+        public override SessionStateStoreData GetItemExclusive(HttpContext context, string id, out bool locked, out TimeSpan lockAge, out object lockId, out SessionStateActions actions)
+        {
+            var e = Get(client, context, true, id, out locked, out lockAge, out lockId, out actions);
 
-			return (e == null)
-					? null
-					: e.ToStoreData(context);
-		}
+            return (e == null)
+                    ? null
+                    : e.ToStoreData(context);
+        }
 
-		private SessionStateItem Get(HttpContext context, bool acquireLock, string id, out bool locked, out TimeSpan lockAge, out object lockId, out SessionStateActions actions)
-		{
-			locked = false;
-			lockId = null;
-			lockAge = TimeSpan.Zero;
-			actions = SessionStateActions.None;
+        public static SessionStateItem Get(IMemcachedClient client, HttpContext context, bool acquireLock, string id, out bool locked, out TimeSpan lockAge, out object lockId, out SessionStateActions actions)
+        {
+            locked = false;
+            lockId = null;
+            lockAge = TimeSpan.Zero;
+            actions = SessionStateActions.None;
 
-			var e = SessionStateItem.Load(this.client, id, false);
-			if (e == null) return null;
+            var e = SessionStateItem.Load(client, id, false);
+            if (e == null)
+                return null;
 
-			if (acquireLock)
-			{
-				// repeat until we can update the retrieved 
-				// item (i.e. nobody changes it between the 
-				// time we get it from the store and updates its attributes)
-				// Save() will return false if Cas() fails
-				while (true)
-				{
-					if (e.LockId > 0) break;
+            if (acquireLock) {
+                // repeat until we can update the retrieved 
+                // item (i.e. nobody changes it between the 
+                // time we get it from the store and updates it s attributes)
+                // Save() will return false if Cas() fails
+                while (true) {
+                    if (e.LockId > 0)
+                        break;
 
-					actions = e.Flag;
+                    actions = e.Flag;
 
-					e.LockId = e.HeadCas;
-					e.LockTime = DateTime.UtcNow;
-					e.Flag = SessionStateActions.None;
+                    e.LockId = exclusiveAccess ? e.HeadCas : 0;
+                    e.LockTime = DateTime.UtcNow;
+                    e.Flag = SessionStateActions.None;
 
-					// try to update the item in the store
-					if (e.Save(this.client, id, true, true))
-					{
-						locked = true;
-						lockId = e.LockId;
+                    // try to update the item in the store
+                    if (e.Save(client, id, true, exclusiveAccess)) {
+                        locked = true;
+                        lockId = e.LockId;
 
-						return e;
-					}
+                        return e;
+                    }
 
-					// it has been modifed between we loaded and tried to save it
-					e = SessionStateItem.Load(this.client, id, false);
-					if (e == null) return null;
-				}
-			}
+                    // it has been modified between we loaded and tried to save it
+                    e = SessionStateItem.Load(client, id, false);
+                    if (e == null)
+                        return null;
+                }
+            }
 
-			locked = true;
-			lockAge = DateTime.UtcNow - e.LockTime;
-			lockId = e.LockId;
-			actions = SessionStateActions.None;
+            locked = true;
+            lockAge = DateTime.UtcNow - e.LockTime;
+            lockId = e.LockId;
+            actions = SessionStateActions.None;
 
-			return acquireLock ? null : e;
-		}
+            return acquireLock ? null : e;
+        }
 
-		public override void InitializeRequest(HttpContext context)
-		{
-		}
+        public override void InitializeRequest(HttpContext context)
+        {
+        }
 
-		public override void ReleaseItemExclusive(HttpContext context, string id, object lockId)
-		{
-			if (!(lockId is ulong))
-				return;
+        public override void ReleaseItemExclusive(HttpContext context, string id, object lockId)
+        {
+            var tmp = (ulong)lockId;
+            SessionStateItem e;
+            do {
+                // Load the header for the item with CAS
+                e = SessionStateItem.Load(client, id, true);
 
-			var tmp = (ulong)lockId;
-			var e = SessionStateItem.Load(this.client, id, true);
+                // Bail if the entry does not exist, or the lock ID does not match our lock ID
+                if (e == null || e.LockId != tmp) {
+                    break;
+                }
 
-			if (e != null && e.LockId == tmp)
-			{
-				e.LockId = 0;
-				e.LockTime = DateTime.MinValue;
+                // Attempt to clear the lock for this item and loop around until we succeed
+                e.LockId = 0;
+                e.LockTime = DateTime.MinValue;
+            } while (!e.Save(client, id, true, exclusiveAccess));
+        }
 
-				e.Save(this.client, id, true, true);
-			}
-		}
+        public override void RemoveItem(HttpContext context, string id, object lockId, SessionStateStoreData item)
+        {
+            var tmp = (ulong)lockId;
+            var e = SessionStateItem.Load(client, id, true);
 
-		public override void RemoveItem(HttpContext context, string id, object lockId, SessionStateStoreData item)
-		{
-			if (!(lockId is ulong)) return;
+            if (e != null && e.LockId == tmp) {
+                SessionStateItem.Remove(client, id);
+            }
+        }
 
-			var tmp = (ulong)lockId;
-			var e = SessionStateItem.Load(this.client, id, true);
+        public override void ResetItemTimeout(HttpContext context, string id)
+        {
+            SessionStateItem e;
+            do {
+                // Load the item with CAS
+                e = SessionStateItem.Load(client, id, false);
+                if (e == null) {
+                    break;
+                }
 
-			if (e != null && e.LockId == tmp)
-			{
-				SessionStateItem.Remove(this.client, id);
-			}
-		}
+                // Try to save with CAS, and loop around until we succeed
+            } while (!e.Save(client, id, false, exclusiveAccess));
+        }
 
-		public override void ResetItemTimeout(HttpContext context, string id)
-		{
-			var e = SessionStateItem.Load(this.client, id, false);
-			if (e != null)
-				e.Save(this.client, id, false, true);
-		}
+        public override void SetAndReleaseItemExclusive(HttpContext context, string id, SessionStateStoreData item, object lockId, bool newItem)
+        {
+            SessionStateItem e = null;
+            do {
+                if (!newItem) {
+                    var tmp = (ulong)lockId;
 
-		public override void SetAndReleaseItemExclusive(HttpContext context, string id, SessionStateStoreData item, object lockId, bool newItem)
-		{
-			SessionStateItem e = null;
-			bool existing = false;
+                    // Load the entire item with CAS (need the DataCas value also for the save)
+                    e = SessionStateItem.Load(client, id, false);
 
-			if (!newItem)
-			{
-				if (!(lockId is ulong))
-					return;
+                    // if we're expecting an existing item, but
+                    // it's not in the cache
+                    // or it's locked by someone else, then quit
+                    if (e == null || e.LockId != tmp) {
+                        return;
+                    }
+                } else {
+                    // Create a new item if it requested
+                    e = new SessionStateItem();
+                }
 
-				var tmp = (ulong)lockId;
-				e = SessionStateItem.Load(this.client, id, true);
-				existing = e != null;
+                // Set the new data and reset the locks
+                e.Timeout = item.Timeout;
+                e.Data = (SessionStateItemCollection)item.Items;
+                e.Flag = SessionStateActions.None;
+                e.LockId = 0;
+                e.LockTime = DateTime.MinValue;
 
-				// if we're expecting an existing item, but
-				// it's not in the cache
-				// or it's not locked
-				// or it's locked by someone else, then quit
-				if (!newItem
-					&& (!existing
-						|| e.LockId == 0
-						|| e.LockId != tmp))
-					return;
-			}
+                // Attempt to save with CAS and loop around if it fails
+            } while (!e.Save(client, id, false, exclusiveAccess && !newItem));
+        }
 
-			if (!existing) e = new SessionStateItem();
-
-			// set the new data and reset the locks
-			e.Timeout = item.Timeout;
-			e.Data = (SessionStateItemCollection)item.Items;
-			e.Flag = SessionStateActions.None;
-			e.LockId = 0;
-			e.LockTime = DateTime.MinValue;
-
-			e.Save(this.client, id, false, existing && !newItem);
-		}
-
-		public override bool SetItemExpireCallback(SessionStateItemExpireCallback expireCallback)
-		{
-			return false;
-		}
+        public override bool SetItemExpireCallback(SessionStateItemExpireCallback expireCallback)
+        {
+            return false;
+        }
 
 		#region [ SessionStateItem             ]
 
-		class SessionStateItem
-		{
-			private static readonly string HeaderPrefix = (System.Web.Hosting.HostingEnvironment.SiteName ?? String.Empty).Replace(" ", "-") + "+" + System.Web.Hosting.HostingEnvironment.ApplicationVirtualPath + "info-";
-			private static readonly string DataPrefix = (System.Web.Hosting.HostingEnvironment.SiteName ?? String.Empty).Replace(" ", "-") + "+" + System.Web.Hosting.HostingEnvironment.ApplicationVirtualPath + "data-";
+        public class SessionStateItem
+        {
+            private static readonly string HeaderPrefix = (System.Web.Hosting.HostingEnvironment.SiteName ?? String.Empty).Replace(" ", "-") + "+" + System.Web.Hosting.HostingEnvironment.ApplicationVirtualPath + "info-";
+            private static readonly string DataPrefix = (System.Web.Hosting.HostingEnvironment.SiteName ?? String.Empty).Replace(" ", "-") + "+" + System.Web.Hosting.HostingEnvironment.ApplicationVirtualPath + "data-";
 
-			public SessionStateItemCollection Data;
-			public SessionStateActions Flag;
-			public ulong LockId;
-			public DateTime LockTime;
+            public SessionStateItemCollection Data;
+            public SessionStateActions Flag;
+            public ulong LockId;
+            public DateTime LockTime;
 
-			// this is in minutes
-			public int Timeout;
+            // this is in minutes
+            public int Timeout;
 
-			public ulong HeadCas;
-			public ulong DataCas;
+            public ulong HeadCas;
+            public ulong DataCas;
 
-			private void SaveHeader(MemoryStream ms)
-			{
-				var p = new Pair(
-									(byte)1,
-									new Triplet(
-													(byte)this.Flag,
-													this.Timeout,
-													new Pair(
-																this.LockId,
-																this.LockTime.ToBinary()
-															)
-												)
-								);
+            private void SaveHeader(MemoryStream ms)
+            {
+                var p = new Pair(
+                                    (byte)1,
+                                    new Triplet(
+                                                    (byte)Flag,
+                                                    Timeout,
+                                                    new Pair(
+                                                                LockId,
+                                                                LockTime.ToBinary()
+                                                            )
+                                                )
+                                );
 
-				new ObjectStateFormatter().Serialize(ms, p);
-			}
+                new ObjectStateFormatter().Serialize(ms, p);
+            }
 
-			public bool Save(IMemcachedClient client, string id, bool metaOnly, bool useCas)
-			{
-				using (var ms = new MemoryStream())
-				{
-					this.SaveHeader(ms);
-					bool retval;
-					var ts = TimeSpan.FromMinutes(this.Timeout);
+            public bool Save(IMemcachedClient client, string id, bool metaOnly, bool useCas)
+            {
+                using (var ms = new MemoryStream()) {
+                    // Save the header first
+                    SaveHeader(ms);
+                    var ts = TimeSpan.FromMinutes(Timeout);
 
-					retval = useCas
-								? client.Cas(StoreMode.Set, HeaderPrefix + id, new ArraySegment<byte>(ms.GetBuffer(), 0, (int)ms.Length), ts, this.HeadCas).Result
-								: client.Store(StoreMode.Set, HeaderPrefix + id, new ArraySegment<byte>(ms.GetBuffer(), 0, (int)ms.Length), ts);
+                    // Attempt to save the header and fail if the CAS fails
+                    bool retval = useCas
+                        ? client.Cas(StoreMode.Set, HeaderPrefix + id, new ArraySegment<byte>(ms.GetBuffer(), 0, (int)ms.Length), ts, HeadCas).Result
+                        : client.Store(StoreMode.Set, HeaderPrefix + id, new ArraySegment<byte>(ms.GetBuffer(), 0, (int)ms.Length), ts);
+                    if (retval == false) {
+                        return false;
+                    }
 
-					if (!metaOnly)
-					{
-						ms.Position = 0;
+                    // Save the data
+                    if (!metaOnly) {
+                        ms.Position = 0;
 
-						using (var bw = new BinaryWriter(ms))
-						{
-							this.Data.Serialize(bw);
-							retval = useCas
-										? client.Cas(StoreMode.Set, DataPrefix + id, new ArraySegment<byte>(ms.GetBuffer(), 0, (int)ms.Length), ts, this.DataCas).Result
-										: client.Store(StoreMode.Set, DataPrefix + id, new ArraySegment<byte>(ms.GetBuffer(), 0, (int)ms.Length), ts);
-						}
-					}
+                        // Serialize the data
+                        using (var bw = new BinaryWriter(ms)) {
+                            Data.Serialize(bw);
 
-					return retval;
-				}
-			}
+                            // Attempt to save the data and fail if the CAS fails
+                            retval = useCas
+                                ? client.Cas(StoreMode.Set, DataPrefix + id, new ArraySegment<byte>(ms.GetBuffer(), 0, (int)ms.Length), ts, DataCas).Result
+                                : client.Store(StoreMode.Set, DataPrefix + id, new ArraySegment<byte>(ms.GetBuffer(), 0, (int)ms.Length), ts);
+                        }
+                    }
 
-			private static SessionStateItem LoadItem(MemoryStream ms)
-			{
-				var graph = new ObjectStateFormatter().Deserialize(ms) as Pair;
-				if (graph == null) return null;
+                    // Return the success of the operation
+                    return retval;
+                }
+            }
 
-				if (((byte)graph.First) != 1) return null;
+            private static SessionStateItem LoadItem(MemoryStream ms)
+            {
+                var graph = new ObjectStateFormatter().Deserialize(ms) as Pair;
+                if (graph == null)
+                    return null;
 
-				var t = (Triplet)graph.Second;
-				var retval = new SessionStateItem();
+                if (((byte)graph.First) != 1)
+                    return null;
 
-				retval.Flag = (SessionStateActions)((byte)t.First);
-				retval.Timeout = (int)t.Second;
+                var t = (Triplet)graph.Second;
+                var retval = new SessionStateItem();
 
-				var lockInfo = (Pair)t.Third;
+                retval.Flag = (SessionStateActions)((byte)t.First);
+                retval.Timeout = (int)t.Second;
 
-				retval.LockId = (ulong)lockInfo.First;
-				retval.LockTime = DateTime.FromBinary((long)lockInfo.Second);
+                var lockInfo = (Pair)t.Third;
 
-				return retval;
-			}
+                retval.LockId = (ulong)lockInfo.First;
+                retval.LockTime = DateTime.FromBinary((long)lockInfo.Second);
 
-			public static SessionStateItem Load(IMemcachedClient client, string id, bool metaOnly)
-			{
-				var header = client.GetWithCas<byte[]>(HeaderPrefix + id);
-				if (header.Result == null) return null;
+                return retval;
+            }
 
-				SessionStateItem entry;
+            public static SessionStateItem Load(IMemcachedClient client, string id, bool metaOnly)
+            {
+                return Load(HeaderPrefix, DataPrefix, client, id, metaOnly);
+            }
 
-				using (var ms = new MemoryStream(header.Result))
-					entry = SessionStateItem.LoadItem(ms);
+            public static SessionStateItem Load(string headerPrefix, string dataPrefix, IMemcachedClient client, string id, bool metaOnly)
+            {
+                // Load the header for the item 
+                var header = client.GetWithCas<byte[]>(headerPrefix + id);
+                if (header.Result == null) {
+                    return null;
+                }
 
-				if (entry != null) entry.HeadCas = header.Cas;
-				if (metaOnly) return entry;
+                // Deserialize the header values
+                SessionStateItem entry;
+                using (var ms = new MemoryStream(header.Result)) {
+                    entry = SessionStateItem.LoadItem(ms);
+                }
+                entry.HeadCas = header.Cas;
 
-				var data = client.GetWithCas<byte[]>(DataPrefix + id);
-				if (data.Result == null) return null;
+                // Bail early if we are only loading the meta data
+                if (metaOnly) {
+                    return entry;
+                }
 
-				using (var ms = new MemoryStream(data.Result))
-				using (var br = new BinaryReader(ms))
-					entry.Data = SessionStateItemCollection.Deserialize(br);
+                // Load the data for the item
+                var data = client.GetWithCas<byte[]>(dataPrefix + id);
+                if (data.Result == null) {
+                    return null;
+                }
+                entry.DataCas = data.Cas;
 
-				entry.DataCas = data.Cas;
+                // Deserialize the data
+                using (var ms = new MemoryStream(data.Result)) {
+                    using (var br = new BinaryReader(ms)) {
+                        entry.Data = SessionStateItemCollection.Deserialize(br);
+                    }
+                }
 
-				return entry;
-			}
+                // Return the session entry
+                return entry;
+            }
 
-			public SessionStateStoreData ToStoreData(HttpContext context)
-			{
-				return new SessionStateStoreData(this.Data, SessionStateUtility.GetSessionStaticObjects(context), this.Timeout);
-			}
+            public SessionStateStoreData ToStoreData(HttpContext context)
+            {
+                return new SessionStateStoreData(Data, SessionStateUtility.GetSessionStaticObjects(context), Timeout);
+            }
 
-			public static void Remove(IMemcachedClient client, string id)
-			{
-				client.Remove(DataPrefix + id);
-				client.Remove(HeaderPrefix + id);
-			}
-		}
+            public static void Remove(IMemcachedClient client, string id)
+            {
+                client.Remove(DataPrefix + id);
+                client.Remove(HeaderPrefix + id);
+            }
+        }
 
 		#endregion
 	}
@@ -333,6 +365,7 @@ namespace Couchbase.AspNet.SessionState
  *    @author Couchbase <info@couchbase.com>
  *    @copyright 2012 Couchbase, Inc.
  *    @copyright 2012 Attila Kiskó, enyim.com
+ *    @copyright 2012 Good Time Hobbies, Inc.
  *    
  *    Licensed under the Apache License, Version 2.0 (the "License");
  *    you may not use this file except in compliance with the License.
