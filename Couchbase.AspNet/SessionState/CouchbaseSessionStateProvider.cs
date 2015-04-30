@@ -310,7 +310,7 @@ namespace Couchbase.AspNet.SessionState
             {
                 // Load the header for the item
                 var header = client.Get<byte[]>(headerPrefix + id);
-                if (header.Status == ResponseStatus.KeyNotFound) {
+                if (header.Status == ResponseStatus.KeyNotFound || !header.Success) {
                     return null;
                 }
 

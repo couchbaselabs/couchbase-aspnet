@@ -12,6 +12,7 @@ namespace Couchbase.AspNet
 {
 	public sealed class CouchbaseClientFactory : ICouchbaseClientFactory
     {
+        private bool initialized = false;
         public IBucket Create(string name, NameValueCollection config, out bool disposeClient)
         {
             // This client should be disposed of as it is not shared
@@ -25,6 +26,11 @@ namespace Couchbase.AspNet
 
             // If a custom section name is passed in, get the section information and use it to construct the Couchbase client
             var section = ConfigurationManager.GetSection(sectionName);
+            if (!initialized)
+            {
+                ClusterHelper.Initialize(sectionName);
+                initialized = true;
+            }
             if (section == null)
 				throw new InvalidOperationException("Invalid config section: " + sectionName);
 			return CreateClient(section);
