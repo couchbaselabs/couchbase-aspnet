@@ -12,52 +12,48 @@ namespace Couchbase.AspNet
 {
 	public sealed class CouchbaseClientFactory : ICouchbaseClientFactory
     {
-        private bool initialized = false;
+        public static Cluster cluster = null;
         public IBucket Create(string name, NameValueCollection config, out bool disposeClient)
         {
             // This client should be disposed of as it is not shared
-            disposeClient = false;
+            disposeClient = true;
 
-            // Get the section name from the configuration file. If not found, create a default Couchbase client which 
-            // will get the configuration information from the default Couchbase client section in the Web.config file
+            // Get the section name from the configuration file. If not found, create a default Couchbase client.
             var sectionName = ProviderHelper.GetAndRemove(config, "section", false);
-	        if (String.IsNullOrEmpty(sectionName))
-				return this.CreateClient(null);
+            if (String.IsNullOrEmpty(sectionName))
+            {
+                return getDefaultClient();
+            }
 
             // If a custom section name is passed in, get the section information and use it to construct the Couchbase client
-            var section = ConfigurationManager.GetSection(sectionName);
-            if (!initialized)
+            var sectionObj = ConfigurationManager.GetSection(sectionName);
+            if (sectionObj == null)
+                throw new InvalidOperationException("Invalid config section: " + sectionName);
+            var section = sectionObj as CouchbaseClientSection;
+            if(section == null)
             {
-                ClusterHelper.Initialize(sectionName);
-                initialized = true;
+                throw new ConfigurationErrorsException(string.Format("CreateClient requires a CouchbaseConfigSection.  Found a {0} instead.", sectionObj.GetType().Name));
             }
-            if (section == null)
-				throw new InvalidOperationException("Invalid config section: " + sectionName);
-			return CreateClient(section);
+            if (cluster == null)
+            {
+                cluster = new Cluster(new ClientConfiguration(section));
+            }
+            BucketElement bucketElement = null;
+            // Strange way to get the first element but, there you go
+            foreach (var item in section.Buckets)
+            {
+                bucketElement = (BucketElement)item;
+                break;
+            }
+            return cluster.OpenBucket(bucketElement.Name, bucketElement.Password);
         }
 
-		private IBucket CreateClient(object config)
-		{
-		    IBucket bucket;
-		    var section = config as CouchbaseClientSection;
-
-		    BucketElement bucketElement = null;
-		    foreach (var item in section.Buckets)
-		    {
-		        bucketElement = (BucketElement) item;
-                break;
-		    }
-		    if (section != null)
-		    {
-		        bucket = ClusterHelper.GetBucket(bucketElement.Name);
-		    }
-		    else
-		    {
-		        const string message = "CreateClient requires a CouchbaseConfigSection. Found a {0} instead.";
-		        throw new ConfigurationErrorsException(string.Format(message, config.GetType().Name));
-		    }
-		    return bucket;
-		}
+        private IBucket getDefaultClient()
+        {
+            IBucket bucket = null;
+            ClusterHelper.Initialize();
+            return ClusterHelper.GetBucket("default");
+        }
     }
 }
 

@@ -310,10 +310,16 @@ namespace Couchbase.AspNet.SessionState
             {
                 // Load the header for the item
                 var header = client.Get<byte[]>(headerPrefix + id);
-                if (header.Status == ResponseStatus.KeyNotFound || !header.Success) {
+                if (header.Status == ResponseStatus.KeyNotFound) {
                     return null;
                 }
 
+                int retry = 0;
+                while (header.Status == ResponseStatus.TemporaryFailure && retry++ < 12)
+                {
+                    System.Threading.Thread.Sleep(3000);
+                    header = client.Get<byte[]>(headerPrefix + id);
+                }
                 // Deserialize the header values
                 SessionStateItem entry;
                 using (var ms = new MemoryStream(header.Value)) {
