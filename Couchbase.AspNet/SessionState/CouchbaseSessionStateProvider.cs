@@ -309,7 +309,16 @@ namespace Couchbase.AspNet.SessionState
             public static SessionStateItem Load(string headerPrefix, string dataPrefix, IBucket client, string id, bool metaOnly)
             {
                 // Load the header for the item
-                var header = client.Get<byte[]>(headerPrefix + id);
+                IOperationResult<byte[]> header = null;
+                try
+                {
+                    header = client.Get<byte[]>(headerPrefix + id);
+                }
+                catch
+                {
+                    //TODO: Log the exception
+                }
+                if(header == null) return null;
                 if (header.Status == ResponseStatus.KeyNotFound) {
                     return null;
                 }
@@ -321,10 +330,19 @@ namespace Couchbase.AspNet.SessionState
                     header = client.Get<byte[]>(headerPrefix + id);
                 }
                 // Deserialize the header values
-                SessionStateItem entry;
-                using (var ms = new MemoryStream(header.Value)) {
-                    entry = SessionStateItem.LoadItem(ms);
+                SessionStateItem entry = null;
+                try
+                {
+                    using (var ms = new MemoryStream(header.Value))
+                    {
+                        entry = SessionStateItem.LoadItem(ms);
+                    }
                 }
+                catch
+                {
+                    //TODO: log error
+                }
+                if (entry == null) return null;
                 entry.HeadCas = header.Cas;
 
                 // Bail early if we are only loading the meta data
