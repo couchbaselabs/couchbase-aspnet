@@ -313,6 +313,12 @@ namespace Couchbase.AspNet.SessionState
                 try
                 {
                     header = client.Get<byte[]>(headerPrefix + id);
+                    int retry = 0;
+                    while (header.Status == ResponseStatus.TemporaryFailure && retry++ < 12)
+                    {
+                        System.Threading.Thread.Sleep(3000);
+                        header = client.Get<byte[]>(headerPrefix + id);
+                    }
                 }
                 catch
                 {
@@ -323,12 +329,6 @@ namespace Couchbase.AspNet.SessionState
                     return null;
                 }
 
-                int retry = 0;
-                while (header.Status == ResponseStatus.TemporaryFailure && retry++ < 12)
-                {
-                    System.Threading.Thread.Sleep(3000);
-                    header = client.Get<byte[]>(headerPrefix + id);
-                }
                 // Deserialize the header values
                 SessionStateItem entry = null;
                 try
