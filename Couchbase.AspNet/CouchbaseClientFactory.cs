@@ -13,11 +13,14 @@ namespace Couchbase.AspNet
 	public sealed class CouchbaseClientFactory : ICouchbaseClientFactory
     {
         public static Cluster cluster = null;
+        public static Dictionary<string, IBucket> buckets = new Dictionary<string,IBucket>();
+        
         public IBucket Create(string name, NameValueCollection config, out bool disposeClient)
         {
             // This client should be disposed of as it is not shared
-            disposeClient = true;
+            disposeClient = false;
 
+            
             // Get the section name from the configuration file. If not found, create a default Couchbase client.
             var sectionName = ProviderHelper.GetAndRemove(config, "section", false);
             if (String.IsNullOrEmpty(sectionName))
@@ -45,7 +48,13 @@ namespace Couchbase.AspNet
                 bucketElement = (BucketElement)item;
                 break;
             }
-            return cluster.OpenBucket(bucketElement.Name, bucketElement.Password);
+            if (!buckets.ContainsKey(bucketElement.Name) || !cluster.IsOpen(bucketElement.Name) )
+            {
+                if (buckets.ContainsKey(bucketElement.Name))
+                    buckets[bucketElement.Name].Dispose();
+                buckets[bucketElement.Name] = cluster.OpenBucket(bucketElement.Name, bucketElement.Password);
+            }
+            return buckets[bucketElement.Name];
         }
 
         private IBucket getDefaultClient()
