@@ -191,7 +191,7 @@ namespace Couchbase.AspNet.SessionState
 
         public override void ResetItemTimeout(HttpContext context, string id)
         {
-            SessionStateItem.Touch(client, id, context.Session.Timeout);
+            SessionStateItem.Touch(client, id, SessionExpires);
         }
 
         public override void SetAndReleaseItemExclusive(HttpContext context, string id, SessionStateStoreData item, object lockId, bool newItem)
@@ -446,15 +446,15 @@ namespace Couchbase.AspNet.SessionState
                 client.Remove(new string[] { DataPrefix + id, HeaderPrefix + id });
             }
 
-            internal static void Touch(IBucket client, string id, int timeout)
+            internal static void Touch(IBucket client, string id, TimeSpan timeout)
             {
                 Touch(HeaderPrefix, DataPrefix, client, id, timeout);
             }
 
-            internal static void Touch(string headerPrefix, string dataPrefix, IBucket client, string id, int timeout)
+            internal static void Touch(string headerPrefix, string dataPrefix, IBucket client, string id, TimeSpan timeout)
             {
-                var result = client.Touch(headerPrefix + id, TimeSpan.FromMinutes(timeout));
-                result = client.Touch(dataPrefix + id, TimeSpan.FromMinutes(timeout));
+                var result = client.Touch(headerPrefix + id, timeout);
+                result = client.Touch(dataPrefix + id, timeout);
 
             }
         }
