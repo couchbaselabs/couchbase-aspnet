@@ -129,8 +129,13 @@ namespace Couchbase.AspNet.SessionState
                     locked = true;
                     lockId = e.LockId;
                     // We got the lock so load the body
-                    e.LoadBody(client, id);
-                    return e.ToStoreData(context); ;
+                    if (e.LoadBody(client, id))
+                        return e.ToStoreData(context);
+                    // we failed to load the body, this could be for any number of reasons but 
+                    // it retried many times so return null, I think this causes them to get a
+                    // new session.
+                    else 
+                        return null;
                 }
                 // Couldn't save so repeat unless
                 // the session seems to have been lost somehow
