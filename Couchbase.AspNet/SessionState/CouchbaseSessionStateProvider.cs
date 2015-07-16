@@ -15,6 +15,7 @@ namespace Couchbase.AspNet.SessionState
 		private IBucket client;
         private bool disposeClient;
         internal static TimeSpan SessionExpires = TimeSpan.FromMinutes(90);
+        internal static int maxLock = 5;
 
 
         public override string Name
@@ -45,6 +46,10 @@ namespace Couchbase.AspNet.SessionState
                 int sessionTimeout = 90;
                 if (int.TryParse(ProviderHelper.GetAndRemove(config, "timeout", false), out sessionTimeout))
                     SessionExpires = TimeSpan.FromMinutes(sessionTimeout);
+            }
+            if(config.AllKeys.Contains("maxLockTime"))
+            {
+                int.TryParse(ProviderHelper.GetAndRemove(config, "maxLickTime", false), out maxLock);
             }
 
             // Make sure no extra attributes are included
@@ -114,8 +119,8 @@ namespace Couchbase.AspNet.SessionState
             // Save() will return false if Cas() fails
             while (true)
             {
-                // It is locked so break out
-                if (e.LockId > 0)
+                // It is locked so break out, but only if the lock is less than 5 minutes old
+                if (e.LockId > 0 && DateTime.UtcNow - e.LockTime < TimeSpan.FromMinutes(maxLock))
                     break;
 
                 e.LockId = e.HeadCas;
@@ -132,10 +137,18 @@ namespace Couchbase.AspNet.SessionState
                     if (e.LoadBody(client, id))
                         return e.ToStoreData(context);
                     // we failed to load the body, this could be for any number of reasons but 
-                    // it retried many times so return null, I think this causes them to get a
+                    // it retried many times so return null, this causes them to get a
                     // new session.
-                    else 
+                    else
+                    {
+                        locked = false;
+                        lockId = 0;
+                        actions = SessionStateActions.InitializeItem;
+                        e.LockId = 0;
+                        e.LockTime = DateTime.MinValue;
+                        e.Save(client, id, true, out status, false);
                         return null;
+                    }
                 }
                 // Couldn't save so repeat unless
                 // the session seems to have been lost somehow
@@ -168,7 +181,8 @@ namespace Couchbase.AspNet.SessionState
         {
             var tmp = (ulong)lockId;
             SessionStateItem e;
-            ResponseStatus status;
+            ResponseStatus status = default(ResponseStatus);
+            uint retry = 0;
             do {
                 // Load the header for the item with CAS
                 e = SessionStateItem.Load(client, id, true);
@@ -181,7 +195,9 @@ namespace Couchbase.AspNet.SessionState
                 // Attempt to clear the lock for this item and loop around until we succeed
                 e.LockId = 0;
                 e.LockTime = DateTime.MinValue;
-            } while (!e.Save(client, id, true, out status, false));
+            } while (!e.Save(client, id, true, out status, false) && retry++ < 20 && status != ResponseStatus.KeyNotFound);
+            if(retry >= 20)
+                throw new System.Web.HttpUnhandledException("Failed to release exclusive lock on session item. Status: " + status.ToString());
         }
 
         public override void RemoveItem(HttpContext context, string id, object lockId, SessionStateStoreData item)
@@ -202,7 +218,8 @@ namespace Couchbase.AspNet.SessionState
         public override void SetAndReleaseItemExclusive(HttpContext context, string id, SessionStateStoreData item, object lockId, bool newItem)
         {
             SessionStateItem e = null;
-            ResponseStatus status;
+            ResponseStatus status = default(ResponseStatus);
+            uint retry = 0;
             do {
                 if (!newItem) {
                     var tmp = (ulong)lockId;
@@ -230,7 +247,9 @@ namespace Couchbase.AspNet.SessionState
                 e.LockTime = DateTime.MinValue;
 
                 // Attempt to save with CAS and loop around if it fails
-            } while (!e.Save(client, id, false, out status, newItem));
+            } while (!e.Save(client, id, false, out status, newItem) && retry++ < 20 && status != ResponseStatus.KeyNotFound);
+            if (retry >= 20)
+                throw new System.Web.HttpUnhandledException("Failed to set and release exclusive lock on session item. Status: " + status.ToString());
         }
 
         public override bool SetItemExpireCallback(SessionStateItemExpireCallback expireCallback)
@@ -395,10 +414,11 @@ namespace Couchbase.AspNet.SessionState
                     return entry;
                 }
 
-                entry.LoadBody(dataPrefix, client, id, timeout);
-
                 // Return the session entry
-                return entry;
+                if (entry.LoadBody(dataPrefix, client, id, timeout))
+                    return entry;
+                else // Couldn't load the body for some reason
+                    return null;
             }
 
             public bool LoadBody(IBucket client, string id, int? timeout = null)
@@ -436,7 +456,7 @@ namespace Couchbase.AspNet.SessionState
                         Data = SessionStateItemCollection.Deserialize(br);
                     }
                 }
-                return true;
+                return Data != null;
             }
             
 
