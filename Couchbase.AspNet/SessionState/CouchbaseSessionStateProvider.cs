@@ -91,7 +91,10 @@ namespace Couchbase.AspNet.SessionState
 
             var e = SessionStateItem.Load(client, id, false);
             if (e == null)
+            {
+                actions = SessionStateActions.InitializeItem;
                 return null;
+            }
 
             locked = e.LockId > 0; // If the lockID is greater than 0 then it is locked
             lockAge = DateTime.UtcNow - e.LockTime;
@@ -111,7 +114,10 @@ namespace Couchbase.AspNet.SessionState
             // Load only the header
             var e = SessionStateItem.Load(client, id, true);
             if (e == null)
+            {
+                actions = SessionStateActions.InitializeItem;
                 return null;
+            }
 
             // repeat until we save or see it is locked
             // item (i.e. nobody changes it between the 
@@ -142,7 +148,7 @@ namespace Couchbase.AspNet.SessionState
                     else
                     {
                         locked = false;
-                        lockId = 0;
+                        lockId = null;
                         actions = SessionStateActions.InitializeItem;
                         e.LockId = 0;
                         e.LockTime = DateTime.MinValue;
