@@ -492,6 +492,7 @@ namespace Couchbase.AspNet.SessionState
 /* ************************************************************
  * 
  *    @author Couchbase <info@couchbase.com>
+ *    @copyright 2015 NetVoyage Corporation
  *    @copyright 2012 Couchbase, Inc.
  *    @copyright 2012 Attila Kiskó, enyim.com
  *    @copyright 2012 Good Time Hobbies, Inc.
