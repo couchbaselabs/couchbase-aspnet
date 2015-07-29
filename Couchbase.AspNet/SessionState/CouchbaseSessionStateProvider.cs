@@ -44,12 +44,12 @@ namespace Couchbase.AspNet.SessionState
             if (config.AllKeys.Contains("timeout"))
             {
                 int sessionTimeout = 90;
-                if (int.TryParse(ProviderHelper.GetAndRemove(config, "timeout", false), out sessionTimeout))
+				if (int.TryParse(ProviderHelper.GetAndRemove(config, "timeout", false), out sessionTimeout))
                     SessionExpires = TimeSpan.FromMinutes(sessionTimeout);
             }
             if(config.AllKeys.Contains("maxLockTime"))
             {
-                int.TryParse(ProviderHelper.GetAndRemove(config, "maxLickTime", false), out maxLock);
+				int.TryParse(ProviderHelper.GetAndRemove(config, "maxLockTime", false), out maxLock);
             }
 
             // Make sure no extra attributes are included
