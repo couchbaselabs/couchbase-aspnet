@@ -315,7 +315,7 @@ namespace Couchbase.AspNet.SessionState
                     if(newItem)
                     {
                         // If new item then insert rather than upsert
-                        retval = client.Insert<byte[]>(HeaderPrefix + id, ms.GetBuffer(), ts);
+                        retval = client.Upsert<byte[]>(HeaderPrefix + id, ms.GetBuffer(), ts);
                         HeadCas = retval.Cas;
                     }
                     else
@@ -339,8 +339,9 @@ namespace Couchbase.AspNet.SessionState
                             Data.Serialize(bw);
                             if (newItem)
                             {
-                                // If new item then insert rather than upsert
-                                retval = client.Insert<byte[]>(DataPrefix + id, ms.GetBuffer(), ts);
+                                // We do an upsert here because sometimes it seems the system reuses sessions ids
+								// so we can get a "new" session that already has a key in couchbase.
+                                retval = client.Upsert<byte[]>(DataPrefix + id, ms.GetBuffer(), ts);
                                 DataCas = retval.Cas;
                             }
                             else
