@@ -156,14 +156,35 @@ namespace Couchbase.AspNet.SessionState
                         return null;
                     }
                 }
-                // Couldn't save so repeat unless
-                // the session seems to have been lost somehow
+                
                 if(status == ResponseStatus.KeyNotFound)
                 {
-                    locked = false;
-                    lockId = 0;
-                    return null;
+                    
                 }
+				// Couldn't save so repeat
+				//Lets handle some common errors
+				if (status != ResponseStatus.Success)
+					switch (status)
+					{
+						case ResponseStatus.VBucketBelongsToAnotherServer:
+						case ResponseStatus.TransportFailure:
+						case ResponseStatus.TemporaryFailure:
+						case ResponseStatus.OutOfMemory:
+						case ResponseStatus.OperationTimeout:
+						case ResponseStatus.Busy:
+						case ResponseStatus.InternalError:
+						case ResponseStatus.NodeUnavailable:
+							// The cluster has issues and should heal itself eventually, so take a nap and try again when you wake up
+							System.Threading.Thread.Sleep(rand.Next(3000, 6000));
+							break;
+						case ResponseStatus.KeyNotFound:
+							{
+								// the session seems to have been lost somehow
+								locked = false;
+								lockId = 0;
+								return null;
+							}
+					}
                 // it has been modified between we loaded and tried to save it
                 e = SessionStateItem.Load(client, id, true);
                 if (e == null)
@@ -190,6 +211,23 @@ namespace Couchbase.AspNet.SessionState
             ResponseStatus status = default(ResponseStatus);
             uint retry = 0;
             do {
+				//Lets handle some common errors
+				// if status is Success then this is the first time around so just skip this switch statement
+				if (status != ResponseStatus.Success)
+					switch (status)
+					{
+						case ResponseStatus.VBucketBelongsToAnotherServer:
+						case ResponseStatus.TransportFailure:
+						case ResponseStatus.TemporaryFailure:
+						case ResponseStatus.OutOfMemory:
+						case ResponseStatus.OperationTimeout:
+						case ResponseStatus.Busy:
+						case ResponseStatus.InternalError:
+						case ResponseStatus.NodeUnavailable:
+							// The cluster has issues and should heal itself eventually, so take a nap and try again when you wake up
+							System.Threading.Thread.Sleep(rand.Next(3000, 6000));
+							break;
+					}
                 // Load the header for the item with CAS
                 e = SessionStateItem.Load(client, id, true);
 
@@ -220,13 +258,31 @@ namespace Couchbase.AspNet.SessionState
         {
             SessionStateItem.Touch(client, id, SessionExpires);
         }
-
+		private static Random rand = new Random();
         public override void SetAndReleaseItemExclusive(HttpContext context, string id, SessionStateStoreData item, object lockId, bool newItem)
         {
             SessionStateItem e = null;
-            ResponseStatus status = default(ResponseStatus);
+			ResponseStatus status = ResponseStatus.Success;
             uint retry = 0;
             do {
+				//Lets handle some common errors
+				// if status is Success then this is the first time around so just skip this switch statement
+				if(status != ResponseStatus.Success)
+				switch(status)
+				{
+					case ResponseStatus.VBucketBelongsToAnotherServer:
+					case ResponseStatus.TransportFailure:
+					case ResponseStatus.TemporaryFailure:
+					case ResponseStatus.OutOfMemory:
+					case ResponseStatus.OperationTimeout:
+					case ResponseStatus.Busy:
+					case ResponseStatus.InternalError:
+					case ResponseStatus.NodeUnavailable:
+						// The cluster has issues and should heal itself eventually, so take a nap and try again when you wake up
+						System.Threading.Thread.Sleep(rand.Next(3000, 6000));
+						break;
+				}
+				
                 if (!newItem) {
                     var tmp = (ulong)lockId;
 
