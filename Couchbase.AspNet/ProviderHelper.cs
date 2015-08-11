@@ -43,7 +43,7 @@ namespace Couchbase.AspNet
                 throw new System.Configuration.ConfigurationErrorsException("Could not load type: " + typeName);
 
             if (!typeof(ICouchbaseClientFactory).IsAssignableFrom(type))
-                throw new System.Configuration.ConfigurationErrorsException("Type '" + typeName + "' must implement IMemcachedClientFactory");
+                throw new System.Configuration.ConfigurationErrorsException("Type '" + typeName + "' must implement ICouchbaseClientFactory");
 
             return (ICouchbaseClientFactory )Activator.CreateInstance(type);
         }
@@ -55,6 +55,7 @@ namespace Couchbase.AspNet
 /* ************************************************************
  * 
  *    @author Couchbase <info@couchbase.com>
+ *    @copyright 2015 NetVoyage Corporation
  *    @copyright 2012 Couchbase, Inc.
  *    @copyright 2012 Attila Kiskó, enyim.com
  *    

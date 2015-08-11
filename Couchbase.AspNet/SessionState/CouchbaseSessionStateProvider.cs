@@ -1,10 +1,12 @@
 ﻿using System;
 using System.Web.SessionState;
+using System.Collections.Generic;
 using System.Web;
 using System.IO;
 using System.Web.UI;
 using Couchbase.Core;
 using Couchbase.IO;
+using System.Linq;
 
 namespace Couchbase.AspNet.SessionState
 {
@@ -12,7 +14,25 @@ namespace Couchbase.AspNet.SessionState
 	{
 		private IBucket client;
         private bool disposeClient;
-        private static bool exclusiveAccess;
+        internal static TimeSpan SessionExpires = TimeSpan.FromMinutes(90);
+        internal static int maxLock = 5;
+
+
+        public override string Name
+        {
+            get
+            {
+                return "Couchbase Session State Provider";
+            }
+        }
+
+        public override string Description
+        {
+            get
+            {
+                return "Implementation of SessionStateStoreProvider using Couchbase as the backend store.";
+            }
+        }
 
 		public override void Initialize(string name, System.Collections.Specialized.NameValueCollection config)
 		{
@@ -21,10 +41,16 @@ namespace Couchbase.AspNet.SessionState
 
             // Create our Couchbase client instance
             client = ProviderHelper.GetClient(name, config, () => (ICouchbaseClientFactory)new CouchbaseClientFactory(), out disposeClient);
-
-            // By default use exclusive session access. But allow it to be overridden in the config file
-            var exclusive = ProviderHelper.GetAndRemove(config, "exclusiveAccess", false) ?? "true";
-            exclusiveAccess = (String.Compare(exclusive, "true", true) == 0);
+            if (config.AllKeys.Contains("timeout"))
+            {
+                int sessionTimeout = 90;
+				if (int.TryParse(ProviderHelper.GetAndRemove(config, "timeout", false), out sessionTimeout))
+                    SessionExpires = TimeSpan.FromMinutes(sessionTimeout);
+            }
+            if(config.AllKeys.Contains("maxLockTime"))
+            {
+				int.TryParse(ProviderHelper.GetAndRemove(config, "maxLockTime", false), out maxLock);
+            }
 
             // Make sure no extra attributes are included
 			ProviderHelper.CheckForUnknownAttributes(config);
@@ -43,38 +69,20 @@ namespace Couchbase.AspNet.SessionState
                 LockId = 0,
                 Timeout = timeout
             };
-
-            e.Save(client, id, false, false);
+            ResponseStatus status;
+            e.Save(client, id, false, out status, true);
         }
 
 		public override void Dispose()
 		{
-            if (disposeClient) {
-                client.Dispose();
-            }
+            //if (disposeClient) {
+            //    client.Dispose();
+            //}
 		}
 
         public override void EndRequest(HttpContext context) { }
 
         public override SessionStateStoreData GetItem(HttpContext context, string id, out bool locked, out TimeSpan lockAge, out object lockId, out SessionStateActions actions)
-        {
-            var e = Get(client, context, false, id, out locked, out lockAge, out lockId, out actions);
-
-            return (e == null)
-                    ? null
-                    : e.ToStoreData(context);
-        }
-
-        public override SessionStateStoreData GetItemExclusive(HttpContext context, string id, out bool locked, out TimeSpan lockAge, out object lockId, out SessionStateActions actions)
-        {
-            var e = Get(client, context, true, id, out locked, out lockAge, out lockId, out actions);
-
-            return (e == null)
-                    ? null
-                    : e.ToStoreData(context);
-        }
-
-        public static SessionStateItem Get(IBucket client, HttpContext context, bool acquireLock, string id, out bool locked, out TimeSpan lockAge, out object lockId, out SessionStateActions actions)
         {
             locked = false;
             lockId = null;
@@ -83,44 +91,113 @@ namespace Couchbase.AspNet.SessionState
 
             var e = SessionStateItem.Load(client, id, false);
             if (e == null)
+            {
+                actions = SessionStateActions.InitializeItem;
                 return null;
-
-            if (acquireLock) {
-                // repeat until we can update the retrieved 
-                // item (i.e. nobody changes it between the 
-                // time we get it from the store and updates it s attributes)
-                // Save() will return false if Cas() fails
-                while (true) {
-                    if (e.LockId > 0)
-                        break;
-
-                    actions = e.Flag;
-
-                    e.LockId = exclusiveAccess ? e.HeadCas : 0;
-                    e.LockTime = DateTime.UtcNow;
-                    e.Flag = SessionStateActions.None;
-
-                    // try to update the item in the store
-                    if (e.Save(client, id, true, exclusiveAccess)) {
-                        locked = true;
-                        lockId = e.LockId;
-
-                        return e;
-                    }
-
-                    // it has been modified between we loaded and tried to save it
-                    e = SessionStateItem.Load(client, id, false);
-                    if (e == null)
-                        return null;
-                }
             }
 
-            locked = true;
+            locked = e.LockId > 0; // If the lockID is greater than 0 then it is locked
             lockAge = DateTime.UtcNow - e.LockTime;
             lockId = e.LockId;
+
+            // If it is locked then return null
+            return locked ? null : e.ToStoreData(context);
+        }
+
+        public override SessionStateStoreData GetItemExclusive(HttpContext context, string id, out bool locked, out TimeSpan lockAge, out object lockId, out SessionStateActions actions)
+        {
+            locked = false;
+            lockId = null;
+            lockAge = TimeSpan.Zero;
             actions = SessionStateActions.None;
 
-            return acquireLock ? null : e;
+            // Load only the header
+            var e = SessionStateItem.Load(client, id, true);
+            if (e == null)
+            {
+                actions = SessionStateActions.InitializeItem;
+                return null;
+            }
+
+            // repeat until we save or see it is locked
+            // item (i.e. nobody changes it between the 
+            // time we get it from the store and updates it s attributes)
+            // Save() will return false if Cas() fails
+            while (true)
+            {
+                // It is locked so break out, but only if the lock is less than 5 minutes old
+                if (e.LockId > 0 && DateTime.UtcNow - e.LockTime < TimeSpan.FromMinutes(maxLock))
+                    break;
+
+                e.LockId = e.HeadCas;
+                e.LockTime = DateTime.UtcNow;
+                e.Flag = SessionStateActions.None;
+
+                // try to update the item in the store
+                ResponseStatus status;
+                if (e.Save(client, id, true, out status, false))
+                {
+                    locked = true;
+                    lockId = e.LockId;
+                    // We got the lock so load the body
+                    if (e.LoadBody(client, id))
+                        return e.ToStoreData(context);
+                    // we failed to load the body, this could be for any number of reasons but 
+                    // it retried many times so return null, this causes them to get a
+                    // new session.
+                    else
+                    {
+                        locked = false;
+                        lockId = null;
+                        actions = SessionStateActions.InitializeItem;
+                        e.LockId = 0;
+                        e.LockTime = DateTime.MinValue;
+                        e.Save(client, id, true, out status, false);
+                        return null;
+                    }
+                }
+                
+                if(status == ResponseStatus.KeyNotFound)
+                {
+                    
+                }
+				// Couldn't save so repeat
+				//Lets handle some common errors
+				if (status != ResponseStatus.Success)
+					switch (status)
+					{
+						case ResponseStatus.VBucketBelongsToAnotherServer:
+						case ResponseStatus.TransportFailure:
+						case ResponseStatus.TemporaryFailure:
+						case ResponseStatus.OutOfMemory:
+						case ResponseStatus.OperationTimeout:
+						case ResponseStatus.Busy:
+						case ResponseStatus.InternalError:
+						case ResponseStatus.NodeUnavailable:
+							// The cluster has issues and should heal itself eventually, so take a nap and try again when you wake up
+							System.Threading.Thread.Sleep(rand.Next(3000, 6000));
+							break;
+						case ResponseStatus.KeyNotFound:
+							{
+								// the session seems to have been lost somehow
+								locked = false;
+								lockId = 0;
+								return null;
+							}
+					}
+                // it has been modified between we loaded and tried to save it
+                e = SessionStateItem.Load(client, id, true);
+                if (e == null)
+                    return null;
+            }
+            // It was locked so we hit this
+            actions = e.Flag;
+            locked = e.LockId > 0;
+            lockAge = DateTime.UtcNow - e.LockTime;
+            lockId = e.LockId;
+            actions = e.Flag;
+
+            return null;
         }
 
         public override void InitializeRequest(HttpContext context)
@@ -131,7 +208,26 @@ namespace Couchbase.AspNet.SessionState
         {
             var tmp = (ulong)lockId;
             SessionStateItem e;
+            ResponseStatus status = default(ResponseStatus);
+            uint retry = 0;
             do {
+				//Lets handle some common errors
+				// if status is Success then this is the first time around so just skip this switch statement
+				if (status != ResponseStatus.Success)
+					switch (status)
+					{
+						case ResponseStatus.VBucketBelongsToAnotherServer:
+						case ResponseStatus.TransportFailure:
+						case ResponseStatus.TemporaryFailure:
+						case ResponseStatus.OutOfMemory:
+						case ResponseStatus.OperationTimeout:
+						case ResponseStatus.Busy:
+						case ResponseStatus.InternalError:
+						case ResponseStatus.NodeUnavailable:
+							// The cluster has issues and should heal itself eventually, so take a nap and try again when you wake up
+							System.Threading.Thread.Sleep(rand.Next(3000, 6000));
+							break;
+					}
                 // Load the header for the item with CAS
                 e = SessionStateItem.Load(client, id, true);
 
@@ -143,7 +239,9 @@ namespace Couchbase.AspNet.SessionState
                 // Attempt to clear the lock for this item and loop around until we succeed
                 e.LockId = 0;
                 e.LockTime = DateTime.MinValue;
-            } while (!e.Save(client, id, true, exclusiveAccess));
+            } while (!e.Save(client, id, true, out status, false) && retry++ < 20 && status != ResponseStatus.KeyNotFound);
+            if(retry >= 20)
+                throw new System.Web.HttpUnhandledException("Failed to release exclusive lock on session item. Status: " + status.ToString());
         }
 
         public override void RemoveItem(HttpContext context, string id, object lockId, SessionStateStoreData item)
@@ -158,22 +256,33 @@ namespace Couchbase.AspNet.SessionState
 
         public override void ResetItemTimeout(HttpContext context, string id)
         {
-            SessionStateItem e;
-            do {
-                // Load the item with CAS
-                e = SessionStateItem.Load(client, id, false);
-                if (e == null) {
-                    break;
-                }
-
-                // Try to save with CAS, and loop around until we succeed
-            } while (!e.Save(client, id, false, exclusiveAccess));
+            SessionStateItem.Touch(client, id, SessionExpires);
         }
-
+		private static Random rand = new Random();
         public override void SetAndReleaseItemExclusive(HttpContext context, string id, SessionStateStoreData item, object lockId, bool newItem)
         {
             SessionStateItem e = null;
+			ResponseStatus status = ResponseStatus.Success;
+            uint retry = 0;
             do {
+				//Lets handle some common errors
+				// if status is Success then this is the first time around so just skip this switch statement
+				if(status != ResponseStatus.Success)
+				switch(status)
+				{
+					case ResponseStatus.VBucketBelongsToAnotherServer:
+					case ResponseStatus.TransportFailure:
+					case ResponseStatus.TemporaryFailure:
+					case ResponseStatus.OutOfMemory:
+					case ResponseStatus.OperationTimeout:
+					case ResponseStatus.Busy:
+					case ResponseStatus.InternalError:
+					case ResponseStatus.NodeUnavailable:
+						// The cluster has issues and should heal itself eventually, so take a nap and try again when you wake up
+						System.Threading.Thread.Sleep(rand.Next(3000, 6000));
+						break;
+				}
+				
                 if (!newItem) {
                     var tmp = (ulong)lockId;
 
@@ -183,6 +292,7 @@ namespace Couchbase.AspNet.SessionState
                     // if we're expecting an existing item, but
                     // it's not in the cache
                     // or it's locked by someone else, then quit
+                    // TODO: We should log this
                     if (e == null || e.LockId != tmp) {
                         return;
                     }
@@ -199,7 +309,9 @@ namespace Couchbase.AspNet.SessionState
                 e.LockTime = DateTime.MinValue;
 
                 // Attempt to save with CAS and loop around if it fails
-            } while (!e.Save(client, id, false, exclusiveAccess && !newItem));
+            } while (!e.Save(client, id, false, out status, newItem) && retry++ < 20 && status != ResponseStatus.KeyNotFound);
+            if (retry >= 20)
+                throw new System.Web.HttpUnhandledException("Failed to set and release exclusive lock on session item. Status: " + status.ToString());
         }
 
         public override bool SetItemExpireCallback(SessionStateItemExpireCallback expireCallback)
@@ -225,35 +337,51 @@ namespace Couchbase.AspNet.SessionState
             public ulong HeadCas;
             public ulong DataCas;
 
+            [Serializable]
+            private class SessionStateItemHeader
+            {
+                public byte start;
+                public SessionStateActions Flag;
+                public int Timeout;
+                public ulong LockId;
+                public long LockTime;
+            }
+
             private void SaveHeader(MemoryStream ms)
             {
-                var p = new Pair(
-                                    (byte)1,
-                                    new Triplet(
-                                                    (byte)Flag,
-                                                    Timeout,
-                                                    new Pair(
-                                                                LockId,
-                                                                LockTime.ToBinary()
-                                                            )
-                                                )
-                                );
-
+                var p = new SessionStateItemHeader()
+                {
+                    Flag = Flag,
+                    Timeout = Timeout,
+                    LockId = LockId,
+                    LockTime = LockTime.ToBinary()
+                };
                 new ObjectStateFormatter().Serialize(ms, p);
             }
 
-            public bool Save(IBucket client, string id, bool metaOnly, bool useCas)
+            public bool Save(IBucket client, string id, bool metaOnly, out ResponseStatus status, bool newItem)
             {
+                status = ResponseStatus.ClientFailure;
                 using (var ms = new MemoryStream()) {
                     // Save the header first
                     SaveHeader(ms);
                     var ts = TimeSpan.FromMinutes(Timeout);
 
-                    // Attempt to save the header and fail if the CAS fails
-                    var retval = useCas
-                        ? client.Upsert(HeaderPrefix + id, new ArraySegment<byte>(ms.GetBuffer(), 0, (int) ms.Length), HeadCas, ts)
-                        : client.Upsert(HeaderPrefix + id, new ArraySegment<byte>(ms.GetBuffer(), 0, (int) ms.Length), ts);
+                    IOperationResult<byte[]> retval;
+                    if(newItem)
+                    {
+                        // If new item then insert rather than upsert
+                        retval = client.Upsert<byte[]>(HeaderPrefix + id, ms.GetBuffer(), ts);
+                        HeadCas = retval.Cas;
+                    }
+                    else
+                    {
+                        // Attempt to save the header and fail if the CAS fails
+                        retval = client.Replace<byte[]>(HeaderPrefix + id, ms.GetBuffer(), HeadCas, ts);
+                        HeadCas = retval.Cas;
+                    }
 
+                    status = retval.Status;
                     if (!retval.Success) {
                         return false;
                     }
@@ -265,14 +393,22 @@ namespace Couchbase.AspNet.SessionState
                         // Serialize the data
                         using (var bw = new BinaryWriter(ms)) {
                             Data.Serialize(bw);
-
-                            // Attempt to save the data and fail if the CAS fails
-                            retval = useCas
-                                ? client.Upsert(DataPrefix + id, new ArraySegment<byte>(ms.GetBuffer(), 0, (int)ms.Length), DataCas, ts)
-                                : client.Upsert(DataPrefix + id, new ArraySegment<byte>(ms.GetBuffer(), 0, (int)ms.Length), ts);
+                            if (newItem)
+                            {
+                                // We do an upsert here because sometimes it seems the system reuses sessions ids
+								// so we can get a "new" session that already has a key in couchbase.
+                                retval = client.Upsert<byte[]>(DataPrefix + id, ms.GetBuffer(), ts);
+                                DataCas = retval.Cas;
+                            }
+                            else
+                            { 
+                                // Attempt to save the data and fail if the CAS fails
+                                retval = client.Replace<byte[]>(DataPrefix + id, ms.GetBuffer(), DataCas, ts);
+                                DataCas = retval.Cas;
+                            }
                         }
                     }
-
+                    status = retval.Status;
                     // Return the success of the operation
                     return retval.Success;
                 }
@@ -280,69 +416,112 @@ namespace Couchbase.AspNet.SessionState
 
             private static SessionStateItem LoadItem(MemoryStream ms)
             {
-                var graph = new ObjectStateFormatter().Deserialize(ms) as Pair;
-                if (graph == null)
+                var header = new ObjectStateFormatter().Deserialize(ms) as SessionStateItemHeader;
+                if (header == null)
                     return null;
 
-                if (((byte)graph.First) != 1)
-                    return null;
-
-                var t = (Triplet)graph.Second;
-                var retval = new SessionStateItem();
-
-                retval.Flag = (SessionStateActions)((byte)t.First);
-                retval.Timeout = (int)t.Second;
-
-                var lockInfo = (Pair)t.Third;
-
-                retval.LockId = (ulong)lockInfo.First;
-                retval.LockTime = DateTime.FromBinary((long)lockInfo.Second);
+                var retval = new SessionStateItem()
+                {
+                    Flag = header.Flag,
+                    Timeout = header.Timeout,
+                    LockId = header.LockId,
+                    LockTime = DateTime.FromBinary((long)header.LockTime)
+                };
 
                 return retval;
             }
 
-            public static SessionStateItem Load(IBucket client, string id, bool metaOnly)
+            public static SessionStateItem Load(IBucket client, string id, bool metaOnly, int? timeout = null)
             {
-                return Load(HeaderPrefix, DataPrefix, client, id, metaOnly);
+                return Load(HeaderPrefix, DataPrefix, client, id, metaOnly, timeout);
             }
 
-            public static SessionStateItem Load(string headerPrefix, string dataPrefix, IBucket client, string id, bool metaOnly)
+            public static SessionStateItem Load(string headerPrefix, string dataPrefix, IBucket client, string id, bool metaOnly, int? timeout = null)
             {
                 // Load the header for the item
-                var header = client.Get<byte[]>(headerPrefix + id);
-                if (header.Status == ResponseStatus.KeyNotFound) {
+                IOperationResult<byte[]> header = null;
+                int retry = 0;
+                TimeSpan ts = SessionExpires;
+                if(timeout.HasValue) ts = TimeSpan.FromMinutes(timeout.Value);
+                header = client.GetAndTouch<byte[]>(headerPrefix + id, ts);
+
+                // We will loop and retry when it might be failing over or having
+                // some other temporary failure.
+                while ((
+                    header.Status == ResponseStatus.TemporaryFailure ||
+                    header.Status == ResponseStatus.ClientFailure ||
+                    header.Status == ResponseStatus.InternalError ||
+                    header.Status == ResponseStatus.VBucketBelongsToAnotherServer
+                    ) && retry++ < 11)
+                {
+                    System.Threading.Thread.Sleep(3000);
+                    header = client.GetAndTouch<byte[]>(headerPrefix + id, ts);
+                }
+                // If we just failed or it wasn't found return null.
+                if (header == null || header.Success == false || header.Status == ResponseStatus.KeyNotFound)
+                {
                     return null;
                 }
 
                 // Deserialize the header values
-                SessionStateItem entry;
-                using (var ms = new MemoryStream(header.Value)) {
+                SessionStateItem entry = null;
+                using (var ms = new MemoryStream(header.Value))
+                {
                     entry = SessionStateItem.LoadItem(ms);
                 }
+                if (entry == null) return null;
                 entry.HeadCas = header.Cas;
 
-                // Bail early if we are only loading the meta data
+                // Skip loading the body if we only want the header/lock object
                 if (metaOnly) {
                     return entry;
                 }
 
-                // Load the data for the item
-                var data = client.Get<byte[]>(dataPrefix + id);
-                if (data.Value == null) {
+                // Return the session entry
+                if (entry.LoadBody(dataPrefix, client, id, timeout))
+                    return entry;
+                else // Couldn't load the body for some reason
                     return null;
+            }
+
+            public bool LoadBody(IBucket client, string id, int? timeout = null)
+            {
+                return LoadBody(DataPrefix, client, id, timeout);
+            }
+
+            public bool LoadBody(string dataPrefix, IBucket client, string id, int? timeout = null)
+            {
+                TimeSpan ts = SessionExpires;
+                if (timeout.HasValue) ts = TimeSpan.FromMinutes(timeout.Value);
+                // Load the data for the item
+                var data = client.GetAndTouch<byte[]>(dataPrefix + id, ts);
+                int retry = 0;
+                while ((
+                        data.Status == ResponseStatus.TemporaryFailure ||
+                        data.Status == ResponseStatus.ClientFailure ||
+                        data.Status == ResponseStatus.InternalError ||
+                        data.Status == ResponseStatus.VBucketBelongsToAnotherServer) && retry++ < 11)
+                {
+                    System.Threading.Thread.Sleep(3000);
+                    data = client.GetAndTouch<byte[]>(dataPrefix + id, ts);
                 }
-                entry.DataCas = data.Cas;
+                if (data == null || data.Success == false || data.Status == ResponseStatus.KeyNotFound || data.Value == null)
+                {
+                    return false;
+                }
+                DataCas = data.Cas;
 
                 // Deserialize the data
-                using (var ms = new MemoryStream(data.Value)) {
-                    using (var br = new BinaryReader(ms)) {
-                        entry.Data = SessionStateItemCollection.Deserialize(br);
+                using (var ms = new MemoryStream(data.Value))
+                {
+                    using (var br = new BinaryReader(ms))
+                    {
+                        Data = SessionStateItemCollection.Deserialize(br);
                     }
                 }
-
-                // Return the session entry
-                return entry;
+                return Data != null;
             }
+            
 
             public SessionStateStoreData ToStoreData(HttpContext context)
             {
@@ -351,8 +530,20 @@ namespace Couchbase.AspNet.SessionState
 
             public static void Remove(IBucket client, string id)
             {
-                client.Remove(DataPrefix + id);
-                client.Remove(HeaderPrefix + id);
+                // Do a bulk remove
+                client.Remove(new string[] { DataPrefix + id, HeaderPrefix + id });
+            }
+
+            internal static void Touch(IBucket client, string id, TimeSpan timeout)
+            {
+                Touch(HeaderPrefix, DataPrefix, client, id, timeout);
+            }
+
+            internal static void Touch(string headerPrefix, string dataPrefix, IBucket client, string id, TimeSpan timeout)
+            {
+                var result = client.Touch(headerPrefix + id, timeout);
+                result = client.Touch(dataPrefix + id, timeout);
+
             }
         }
 
@@ -364,6 +555,7 @@ namespace Couchbase.AspNet.SessionState
 /* ************************************************************
  * 
  *    @author Couchbase <info@couchbase.com>
+ *    @copyright 2015 NetVoyage Corporation
  *    @copyright 2012 Couchbase, Inc.
  *    @copyright 2012 Attila Kiskó, enyim.com
  *    @copyright 2012 Good Time Hobbies, Inc.
