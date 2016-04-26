@@ -5,6 +5,8 @@ using System.Web.SessionState;
 using System.Web.UI;
 using Couchbase.Core;
 using Couchbase.IO;
+using System.Threading.Tasks;
+using System.Collections.Generic;
 
 namespace Couchbase.AspNet.SessionState
 {
@@ -117,8 +119,12 @@ namespace Couchbase.AspNet.SessionState
         {
             var dataStatus = ResponseStatus.None;
             var headerStatus = ResponseStatus.None;
-
-            var failed = SaveData(bucket, id, useCas, out dataStatus) && SaveHeader(bucket, id, useCas, out headerStatus);
+            bool saveData = false, saveHeader = false;
+            Parallel.Invoke(
+                () => saveData = SaveData(bucket, id, useCas, out dataStatus),
+                () => saveHeader = SaveHeader(bucket, id, useCas, out headerStatus)
+            );
+            var failed = saveData && saveHeader;
             keyNotFound = dataStatus == ResponseStatus.KeyNotFound || headerStatus == ResponseStatus.KeyNotFound;
             return failed;
         }
@@ -128,29 +134,26 @@ namespace Couchbase.AspNet.SessionState
         /// </summary>
         /// <param name="s">Stream to load the item from</param>
         /// <returns>Value read from the stream, null on failure</returns>
-        private static SessionStateItem LoadHeader(
-            Stream s)
+        private static void LoadHeader(
+            Stream s,
+            SessionStateItem entry)
         {
             var graph = new ObjectStateFormatter().Deserialize(s) as Pair;
             if (graph == null)
-                return null;
+                return;
 
             if (((byte)graph.First) != 1)
-                return null;
+                return;
 
             var t = (Triplet)graph.Second;
-            var retval = new SessionStateItem
-            {
-                Flag = (SessionStateActions)((byte)t.First),
-                Timeout = (int)t.Second
-            };
+
+            entry.Flag = (SessionStateActions)((byte)t.First);
+            entry.Timeout = (int)t.Second;
 
             var lockInfo = (Pair)t.Third;
 
-            retval.LockId = (ulong)lockInfo.First;
-            retval.LockTime = DateTime.FromBinary((long)lockInfo.Second);
-
-            return retval;
+            entry.LockId = (ulong)lockInfo.First;
+            entry.LockTime = DateTime.FromBinary((long)lockInfo.Second);
         }
 
         /// <summary>
@@ -188,46 +191,63 @@ namespace Couchbase.AspNet.SessionState
             string id,
             bool metaOnly)
         {
-            // Read the header value from Couchbase
-            var header = bucket.Get<byte[]>(CouchbaseSessionStateProvider.HeaderPrefix + id);
-            if (header.Status != ResponseStatus.Success)
-            {
-                return null;
-            }
+            IOperationResult<byte[]> header = null;
+            IOperationResult<byte[]> data = null;
+            SessionStateItem entry = new SessionStateItem();
 
-            // Deserialize the header values
-            SessionStateItem entry;
-            using (var ms = new MemoryStream(header.Value))
-            {
-                entry = LoadHeader(ms);
-            }
-            entry.HeadCas = header.Cas;
-
-            // Bail early if we are only loading the meta data
             if (metaOnly)
             {
+                LoadHeader(bucket, id, entry, out header); // Read the header value from Couchbase
+                if (header.Status != ResponseStatus.Success)
+                {
+                    return null;
+                }
                 return entry;
             }
-
-            // Read the data for the item from Couchbase
-            var data = bucket.Get<byte[]>(CouchbaseSessionStateProvider.DataPrefix + id);
-            if (data.Value == null)
+            else
             {
-                return null;
-            }
-            entry.DataCas = data.Cas;
-
-            // Deserialize the data
-            using (var ms = new MemoryStream(data.Value))
-            {
-                using (var br = new BinaryReader(ms))
+                Parallel.Invoke(
+                    () => LoadHeader(bucket, id, entry, out header), // Read the header value from Couchbase
+                    () => LoadData(bucket, id, entry, out data) // Read the data for the item from Couchbase
+                );
+                if (data.Value == null)
                 {
-                    entry.Data = SessionStateItemCollection.Deserialize(br);
+                    return null;
                 }
             }
-
             // Return the session entry
             return entry;
+        }
+
+        private static void LoadHeader(IBucket bucket, string id, SessionStateItem entry, out IOperationResult<byte[]> header)
+        {
+            header = bucket.Get<byte[]>(CouchbaseSessionStateProvider.HeaderPrefix + id);
+            if(header.Status == ResponseStatus.Success)
+            {
+                // Deserialize the header values
+                using (var ms = new MemoryStream(header.Value))
+                {
+                    LoadHeader(ms, entry);
+                }
+                entry.HeadCas = header.Cas;
+            }
+        }
+
+        private static void LoadData(IBucket bucket, string id, SessionStateItem entry, out IOperationResult<byte[]> data)
+        {
+            data = bucket.Get<byte[]>(CouchbaseSessionStateProvider.DataPrefix + id);
+            if (data.Status == ResponseStatus.Success)
+            {
+                // Deserialize the data
+                using (var ms = new MemoryStream(data.Value))
+                {
+                    using (var br = new BinaryReader(ms))
+                    {
+                        entry.Data = SessionStateItemCollection.Deserialize(br);
+                    }
+                }
+                entry.DataCas = data.Cas;
+            }
         }
 
         /// <summary>
@@ -250,8 +270,10 @@ namespace Couchbase.AspNet.SessionState
             IBucket bucket,
             string id)
         {
-            bucket.Remove(CouchbaseSessionStateProvider.DataPrefix + id);
-            bucket.Remove(CouchbaseSessionStateProvider.HeaderPrefix + id);
+            bucket.Remove(new List<string> {
+                CouchbaseSessionStateProvider.DataPrefix + id,
+                CouchbaseSessionStateProvider.HeaderPrefix + id
+                });
         }
     }
 }
