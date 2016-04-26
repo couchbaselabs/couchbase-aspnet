@@ -195,6 +195,7 @@ namespace Couchbase.AspNet.SessionState
             IOperationResult<byte[]> data = null;
             SessionStateItem entry = new SessionStateItem();
 
+            // Bail early if we are only loading the meta data
             if (metaOnly)
             {
                 LoadHeader(bucket, id, entry, out header); // Read the header value from Couchbase
