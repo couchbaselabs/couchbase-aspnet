@@ -3,8 +3,10 @@ using System.IO;
 using System.Web;
 using System.Web.SessionState;
 using System.Web.UI;
+using Common.Logging;
 using Couchbase.Core;
 using Couchbase.IO;
+using Newtonsoft.Json;
 
 namespace Couchbase.AspNet.SessionState
 {
@@ -24,6 +26,8 @@ namespace Couchbase.AspNet.SessionState
         public ulong HeadCas;
         public ulong DataCas;
 
+        private static readonly ILog _log = LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
+
         /// <summary>
         /// Writes the header to the stream
         /// </summary>
@@ -39,7 +43,7 @@ namespace Couchbase.AspNet.SessionState
                     new Pair(
                         LockId,
                         LockTime.ToBinary()))
-                );
+            );
             new ObjectStateFormatter().Serialize(s, p);
         }
 
@@ -56,8 +60,7 @@ namespace Couchbase.AspNet.SessionState
             bool useCas,
             out ResponseStatus status)
         {
-            using (var ms = new MemoryStream())
-            {
+            using (var ms = new MemoryStream()) {
                 WriteHeader(ms);
                 var ts = TimeSpan.FromMinutes(Timeout);
 
@@ -87,18 +90,17 @@ namespace Couchbase.AspNet.SessionState
         {
             var ts = TimeSpan.FromMinutes(Timeout);
             using (var ms = new MemoryStream())
-            using (var bw = new BinaryWriter(ms))
-            {
-                Data.Serialize(bw);
+                using (var bw = new BinaryWriter(ms)) {
+                    Data.Serialize(bw);
 
-                // Attempt to save the data and fail if the CAS fails
-                var retval = useCas
-                    ? bucket.Upsert(CouchbaseSessionStateProvider.DataPrefix + id, ms.ToArray(), DataCas, ts)
-                    : bucket.Upsert(CouchbaseSessionStateProvider.DataPrefix + id, ms.ToArray(), ts);
+                    // Attempt to save the data and fail if the CAS fails
+                    var retval = useCas
+                        ? bucket.Upsert(CouchbaseSessionStateProvider.DataPrefix + id, ms.ToArray(), DataCas, ts)
+                        : bucket.Upsert(CouchbaseSessionStateProvider.DataPrefix + id, ms.ToArray(), ts);
 
-                status = retval.Status;
-                return retval.Success;
-            }
+                    status = retval.Status;
+                    return retval.Success;
+                }
         }
 
         /// <summary>
@@ -139,8 +141,7 @@ namespace Couchbase.AspNet.SessionState
                 return null;
 
             var t = (Triplet)graph.Second;
-            var retval = new SessionStateItem
-            {
+            var retval = new SessionStateItem {
                 Flag = (SessionStateActions)((byte)t.First),
                 Timeout = (int)t.Second
             };
@@ -190,38 +191,52 @@ namespace Couchbase.AspNet.SessionState
         {
             // Read the header value from Couchbase
             var header = bucket.Get<byte[]>(CouchbaseSessionStateProvider.HeaderPrefix + id);
-            if (header.Status != ResponseStatus.Success)
-            {
+            if (header.Status != ResponseStatus.Success) {
+                if (header.Status != ResponseStatus.KeyNotFound) {
+                    _log.Warn(JsonConvert.SerializeObject(
+                        new {
+                            Key = CouchbaseSessionStateProvider.HeaderPrefix + id,
+                            Status = header.Status.ToString(),
+                            header.Message,
+                            header.Exception
+                        }
+                    ));
+                }
                 return null;
             }
 
+            if (_log.IsDebugEnabled) {
+                _log.Debug(JsonConvert.SerializeObject(
+                    new {
+                        Key = CouchbaseSessionStateProvider.HeaderPrefix + id,
+                        Status = header.Status.ToString(),
+                        header.Message,
+                        header.Exception
+                    }
+                ));
+            }
             // Deserialize the header values
             SessionStateItem entry;
-            using (var ms = new MemoryStream(header.Value))
-            {
+            using (var ms = new MemoryStream(header.Value)) {
                 entry = LoadHeader(ms);
             }
             entry.HeadCas = header.Cas;
 
             // Bail early if we are only loading the meta data
-            if (metaOnly)
-            {
+            if (metaOnly) {
                 return entry;
             }
 
             // Read the data for the item from Couchbase
             var data = bucket.Get<byte[]>(CouchbaseSessionStateProvider.DataPrefix + id);
-            if (data.Value == null)
-            {
+            if (data.Value == null) {
                 return null;
             }
             entry.DataCas = data.Cas;
 
             // Deserialize the data
-            using (var ms = new MemoryStream(data.Value))
-            {
-                using (var br = new BinaryReader(ms))
-                {
+            using (var ms = new MemoryStream(data.Value)) {
+                using (var br = new BinaryReader(ms)) {
                     entry.Data = SessionStateItemCollection.Deserialize(br);
                 }
             }

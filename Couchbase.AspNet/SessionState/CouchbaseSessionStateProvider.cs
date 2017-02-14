@@ -1,9 +1,13 @@
 ﻿using System;
 using System.Collections.Specialized;
+using System.Configuration;
 using System.Web.SessionState;
 using System.Web;
+using System.Web.Configuration;
+using Common.Logging;
 using Couchbase.Core;
 using Couchbase.IO;
+using Newtonsoft.Json;
 
 namespace Couchbase.AspNet.SessionState
 {
@@ -17,8 +21,11 @@ namespace Couchbase.AspNet.SessionState
         private int _maxRetryCount = 5;
         private string _configName;
         private string _bucketName;
+        private static TimeSpan _executionTimeout;
 
         private static readonly object _syncObj = new object();
+
+        private static readonly ILog _log = LogManager.GetLogger(System.Reflection.MethodBase.GetCurrentMethod().DeclaringType);
 
         /// <summary>
         /// Required default ctor for ASP.NET
@@ -30,18 +37,12 @@ namespace Couchbase.AspNet.SessionState
         /// <summary>
         /// Gets the name of the provider
         /// </summary>
-        public override string Name
-        {
-            get { return GetType().Name; }
-        }
+        public override string Name { get { return GetType().Name; } }
 
         /// <summary>
         /// Gets a description of the provider.
         /// </summary>
-        public override string Description
-        {
-            get { return "Implementation of SessionStateStoreProvider using Couchbase Server as the backend store."; }
-        }
+        public override string Description { get { return "Implementation of SessionStateStoreProvider using Couchbase Server as the backend store."; } }
 
         /// <summary>
         /// For unit testing only.
@@ -73,7 +74,9 @@ namespace Couchbase.AspNet.SessionState
         /// </summary>
         /// <param name="name">Name of the element in the configuration file</param>
         /// <param name="config">Configuration values for the provider from the Web.config file</param>
-        public override void Initialize(string name, NameValueCollection config)
+        public override void Initialize(
+            string name,
+            NameValueCollection config)
         {
             // Initialize the base class
             base.Initialize(name, config);
@@ -82,11 +85,13 @@ namespace Couchbase.AspNet.SessionState
             AppDomain.CurrentDomain.DomainUnload += Application_End;
             ClusterClient.Configure(name, config);
 
-            lock (_syncObj)
-            {
+            lock (_syncObj) {
                 // Create the bucket based off the name provided in the
                 _bucketName = ProviderHelper.GetAndRemove(config, "bucket", false);
                 _bucket = ClusterClient.GetBucket(name, _bucketName);
+
+                var section = (HttpRuntimeSection)ConfigurationManager.GetSection("system.web/httpRuntime");
+                _executionTimeout = section.ExecutionTimeout;
             }
 
             // By default use exclusive session access. But allow it to be overridden in the config file
@@ -95,19 +100,16 @@ namespace Couchbase.AspNet.SessionState
 
             // Allow optional header and data prefixes to be used for this application
             var headerPrefix = ProviderHelper.GetAndRemove(config, "headerPrefix", false);
-            if (headerPrefix != null)
-            {
+            if (headerPrefix != null) {
                 HeaderPrefix = headerPrefix;
             }
             var dataPrefix = ProviderHelper.GetAndRemove(config, "dataPrefix", false);
-            if (dataPrefix != null)
-            {
+            if (dataPrefix != null) {
                 DataPrefix = dataPrefix;
             }
             var maxRetryCount = ProviderHelper.GetAndRemove(config, "maxRetryCount", false);
             var temp = 0;
-            if (int.TryParse(maxRetryCount, out temp))
-            {
+            if (int.TryParse(maxRetryCount, out temp)) {
                 _maxRetryCount = temp;
             }
 
@@ -127,14 +129,13 @@ namespace Couchbase.AspNet.SessionState
         /// </summary>
         /// <param name="sender">The source of the event.</param>
         /// <param name="e">The <see cref="EventArgs"/> instance containing the event data.</param>
-        public void Application_End(object sender, EventArgs e)
+        public void Application_End(
+            object sender,
+            EventArgs e)
         {
-            try
-            {
+            try {
                 ClusterClient.CloseOne(_configName, _bucketName);
-            }
-            catch (Exception)
-            {
+            } catch (Exception) {
                 //the app domain has already shutdown
             }
         }
@@ -144,7 +145,8 @@ namespace Couchbase.AspNet.SessionState
         /// initialization required by the session-state store provider. 
         /// </summary>
         /// <param name="context">HttpContext for the current request</param>
-        public override void InitializeRequest(HttpContext context)
+        public override void InitializeRequest(
+            HttpContext context)
         {
         }
 
@@ -153,7 +155,8 @@ namespace Couchbase.AspNet.SessionState
         /// cleanup required by the session-state store provider.
         /// </summary>
         /// <param name="context">HttpContext for the current request</param>
-        public override void EndRequest(HttpContext context)
+        public override void EndRequest(
+            HttpContext context)
         {
         }
 
@@ -167,7 +170,9 @@ namespace Couchbase.AspNet.SessionState
         /// <param name="context">HttpContext for the current request</param>
         /// <param name="timeout">Timeout value for the session</param>
         /// <returns>New SessionStateStoreData object for storing the session state data</returns>
-        public override SessionStateStoreData CreateNewStoreData(HttpContext context, int timeout)
+        public override SessionStateStoreData CreateNewStoreData(
+            HttpContext context,
+            int timeout)
         {
             return new SessionStateStoreData(new SessionStateItemCollection(),
                 SessionStateUtility.GetSessionStaticObjects(context),
@@ -182,10 +187,12 @@ namespace Couchbase.AspNet.SessionState
         /// <param name="context">HttpContext for the current request</param>
         /// <param name="id">Session ID for the new session</param>
         /// <param name="timeout">Timeout value for the session</param>
-        public override void CreateUninitializedItem(HttpContext context, string id, int timeout)
+        public override void CreateUninitializedItem(
+            HttpContext context,
+            string id,
+            int timeout)
         {
-            var e = new SessionStateItem
-            {
+            var e = new SessionStateItem {
                 Data = new SessionStateItemCollection(),
                 Flag = SessionStateActions.InitializeItem,
                 LockId = 0,
@@ -214,6 +221,7 @@ namespace Couchbase.AspNet.SessionState
             out object lockId,
             out SessionStateActions actions)
         {
+            // this override is busted; according to the spec it should not return the sessionstate object if it's currently locked, yet it does
             var e = GetSessionStoreItem(_bucket, context, false, id, out locked, out lockAge, out lockId, out actions);
             return (e == null) ? null : e.ToStoreData(context);
         }
@@ -273,14 +281,12 @@ namespace Couchbase.AspNet.SessionState
             if (e == null)
                 return null;
 
-            if (acquireLock)
-            {
+            if (acquireLock) {
                 // repeat until we can update the retrieved 
                 // item (i.e. nobody changes it between the 
                 // time we get it from the store and updates it s attributes)
                 // Save() will return false if Cas() fails
-                while (true)
-                {
+                while (true) {
                     if (e.LockId > 0)
                         break;
 
@@ -292,15 +298,13 @@ namespace Couchbase.AspNet.SessionState
 
                     ResponseStatus status;
                     // try to update the item in the store
-                    if (e.SaveHeader(bucket, id, _exclusiveAccess, out status))
-                    {
+                    if (e.SaveHeader(bucket, id, _exclusiveAccess, out status)) {
                         locked = true;
                         lockId = e.LockId;
 
                         return e;
                     }
-                    if (status == ResponseStatus.KeyNotFound)
-                    {
+                    if (status == ResponseStatus.KeyNotFound) {
                         break;
                     }
 
@@ -308,6 +312,16 @@ namespace Couchbase.AspNet.SessionState
                     e = SessionStateItem.Load(bucket, id, false);
                     if (e == null)
                         return null;
+
+                    _log.Warn(JsonConvert.SerializeObject(
+                        new {
+                            message = "AcquireLock loop reached in GetSessionStoreItem",
+                            id,
+                            e.LockTime, // the time the lock was acquired (from a different request)
+                            e.LockId,   // the CAS value (from the same different request)
+                            status
+                        }
+                    ));
                 }
             }
 
@@ -315,6 +329,18 @@ namespace Couchbase.AspNet.SessionState
             lockAge = DateTime.UtcNow - e.LockTime;
             lockId = e.LockId;
             actions = SessionStateActions.None;
+
+            if (acquireLock && _log.IsInfoEnabled) {
+                _log.Info(JsonConvert.SerializeObject(
+                    new {
+                        message = "SessionState object is locked",
+                        id,
+                        lockAge,
+                        lockId,
+                        ExecutionTimeout = _executionTimeout.TotalSeconds
+                    }
+                ));
+            }
 
             return acquireLock ? null : e;
         }
@@ -339,8 +365,7 @@ namespace Couchbase.AspNet.SessionState
             var retries = 0;
             SessionStateItem e;
             do {
-                if (!newItem)
-                {
+                if (!newItem) {
                     var tmp = (ulong)lockId;
 
                     // Load the entire item with CAS (need the DataCas value also for the save)
@@ -349,13 +374,10 @@ namespace Couchbase.AspNet.SessionState
                     // if we're expecting an existing item, but
                     // it's not in the cache
                     // or it's locked by someone else, then quit
-                    if (e == null || e.LockId != tmp)
-                    {
+                    if (e == null || e.LockId != tmp) {
                         return;
                     }
-                }
-                else
-                {
+                } else {
                     // Create a new item if it requested
                     e = new SessionStateItem();
                 }
@@ -391,8 +413,7 @@ namespace Couchbase.AspNet.SessionState
                 e = SessionStateItem.Load(_bucket, id, true);
 
                 // Bail if the entry does not exist, or the lock ID does not match our lock ID
-                if (e == null || e.LockId != tmp)
-                {
+                if (e == null || e.LockId != tmp) {
                     break;
                 }
 
@@ -418,8 +439,7 @@ namespace Couchbase.AspNet.SessionState
             var tmp = (ulong)lockId;
             var e = SessionStateItem.Load(_bucket, id, true);
 
-            if (e != null && e.LockId == tmp)
-            {
+            if (e != null && e.LockId == tmp) {
                 SessionStateItem.Remove(_bucket, id);
             }
         }
@@ -439,8 +459,7 @@ namespace Couchbase.AspNet.SessionState
             do {
                 // Load the item with CAS
                 e = SessionStateItem.Load(_bucket, id, false);
-                if (e == null)
-                {
+                if (e == null) {
                     break;
                 }
 
@@ -454,7 +473,8 @@ namespace Couchbase.AspNet.SessionState
         /// </summary>
         /// <param name="expireCallback">Session expiration callback to set</param>
         /// <returns>False, since we don't support this feature</returns>
-        public override bool SetItemExpireCallback(SessionStateItemExpireCallback expireCallback)
+        public override bool SetItemExpireCallback(
+            SessionStateItemExpireCallback expireCallback)
         {
             return false;
         }

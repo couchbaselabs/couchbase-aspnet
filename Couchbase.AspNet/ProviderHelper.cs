@@ -47,7 +47,7 @@ namespace Couchbase.AspNet
         /// Gets a Couchbase bucket using the couchbase factory configured in the Web.config file. If the factory is
         /// not defined in the Web.config file section, then the default factory is used.
         /// </summary>
-        /// <param name="name">Name of the bucket</param>
+        /// <param name="name">Name of the bucket WHICH EVIDENTLY IS UNUSED</param>
         /// <param name="config">Name value collection from config file</param>
         /// <param name="cluster">The <see cref="ICluster"/> instance.</param>
         /// <returns>Instance of the couchbase bucket to use</returns>

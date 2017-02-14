@@ -20,7 +20,7 @@ namespace Couchbase.AspNet.UnitTests
         public void GetBucket_CouchbaseSession_ReturnsBucket()
         {
             var config = new NameValueCollection {
-                { "bucket", "memcached" }
+                { "bucket", "transient1" }
             };
             var cluster = ProviderHelper.GetCluster("couchbase-session", null);
             var bucket = ProviderHelper.GetBucket("default", config, cluster);
@@ -33,7 +33,7 @@ namespace Couchbase.AspNet.UnitTests
         public void GetBucket_CouchbaseSession_ReturnsMemcachedBucket()
         {
             var config = new NameValueCollection {
-                { "bucket", "memcached" }
+                { "bucket", "transient1" }
             };
             var cluster = ProviderHelper.GetCluster("couchbase-session", null);
             var bucket = ProviderHelper.GetBucket("default", config, cluster);
@@ -55,7 +55,7 @@ namespace Couchbase.AspNet.UnitTests
         public void GetBucket_CouchbaseCache_ReturnsBucket()
         {
             var config = new NameValueCollection {
-                { "bucket", "default" }
+                { "bucket", "data1" }
             };
             var cluster = ProviderHelper.GetCluster("couchbase-cache", null);
             var bucket = ProviderHelper.GetBucket("default", config, cluster);
@@ -68,12 +68,12 @@ namespace Couchbase.AspNet.UnitTests
         public void GetBucket_CouchbaseCache_ReturnsMemcachedBucket()
         {
             var config = new NameValueCollection {
-                { "bucket", "default" }
+                { "bucket", "data1" }
             };
             var cluster = ProviderHelper.GetCluster("couchbase-cache", null);
             var bucket = ProviderHelper.GetBucket("default", config, cluster);
 
-            Assert.AreEqual(typeof(CouchbaseBucket), bucket.GetType());
+            Assert.AreEqual(typeof(MemcachedBucket), bucket.GetType());
         }
     }
 }

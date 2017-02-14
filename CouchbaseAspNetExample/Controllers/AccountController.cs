@@ -5,6 +5,7 @@ using System.Security.Claims;
 using System.Threading.Tasks;
 using System.Web;
 using System.Web.Mvc;
+using System.Web.SessionState;
 using Microsoft.AspNet.Identity;
 using Microsoft.AspNet.Identity.Owin;
 using Microsoft.Owin.Security;
@@ -13,6 +14,7 @@ using CouchbaseAspNetExample.Models;
 namespace CouchbaseAspNetExample.Controllers
 {
     [Authorize]
+    [SessionState(SessionStateBehavior.ReadOnly)]
     public class AccountController : Controller
     {
         private ApplicationSignInManager _signInManager;
