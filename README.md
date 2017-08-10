@@ -3,7 +3,7 @@ couchbase-aspnet 2.0
 
 This library provides infrastructure support for using [Couchbase Server](http://couchbase.com) and ASP.NET.
 
-### Version 3.0 development branch is "3" ###
+### Version Next development branch is "3.0" ###
 
 ## Features:
 
