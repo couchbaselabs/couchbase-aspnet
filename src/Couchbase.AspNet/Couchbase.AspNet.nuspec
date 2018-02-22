@@ -1,0 +1,29 @@
+﻿<?xml version="1.0"?>
+<package >
+  <metadata>
+    <id>CouchbaseAspNet</id>
+    <version>3.0.0-beta</version>
+    <title>Couchbase ASP.NET SessionState and OutputCache Providers.</title>
+    <authors>Couchbase, Inc.</authors>
+    <owners>Couchbase, Inc.</owners>
+    <licenseUrl>http://www.apache.org/licenses/LICENSE-2.0</licenseUrl>
+    <projectUrl>http://www.couchbase.com/communities/net</projectUrl>
+     <description>Couchbase ASP.NET SessionState and OutputCache Providers.</description>
+    <releaseNotes></releaseNotes>
+    <copyright>Copyright 2018</copyright>
+    <tags>couchbase nosql asp.net</tags>
+	<dependencies>
+	<group>
+	  <dependency id="Common.Logging" version="3.4.1" />
+	  <dependency  id="Common.Logging.Core" version="3.4.1"  />
+	  <dependency  id="CouchbaseNetClient" version="2.5.5"  />
+	  <dependency  id="Microsoft.AspNet.SessionState.SessionStateModule" version="1.1.0"  />
+	  <dependency  id="Microsoft.AspNet.WebApi.Client" version="5.2.4" />
+	  <dependency  id="Microsoft.AspNet.WebApi.Core" version="5.2.4"  />
+	  <dependency  id="Microsoft.AspNet.WebApi.WebHost" version="5.2.4" />
+	  <dependency  id="Microsoft.CSharp" version="4.4.1" />
+	  <dependency  id="Newtonsoft.Json" version="11.0.1" />
+	</group>
+	</dependencies>
+  </metadata>
+</package>
